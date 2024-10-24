@@ -1,284 +1,396 @@
-# Server-side plugin for monitoring Kubernetes namespaces,
-# resides at lib/python3/cmk/base/plugins/agent_based/kubernetes_namespaces.py
+#!/usr/bin/env python3
+# Agent plugin to check the status of Kubernetes namespaces
+# Runs on monitored Kubernetes node in /usr/lib/check_mk_agent/plugins/kubernetes_namespaces
 # ©2024 henri.wahl@ukdd.de
 
-from datetime import datetime
+from json import loads
+from os import access, X_OK, environ
+from pathlib import Path
+from subprocess import run, PIPE
+from sys import argv
 
-from .agent_based_api.v1 import Metric, register, Result, Service, State
+# Dictionary to store namespaces
+namespaces = dict()
 
-# separates Kubernetes resources in the item name
-SEPARATOR = ' / '
-# list of Kubernetes objects that are simplified, like pods, which are not looked at in every detail
-SIMPLE_KUBERNETES_OBJECTS = ['pods']
-# time string for non-existing time in CronJob objects
+# Constant for beginning of time if there is no value for lastScheduleTime or lastSuccessfulTime
 TIME_ZERO = '1970-01-01T00:00:00Z'
 
+# Configuration file for the plugin
+CONFIG_FILE=f'/etc/check_mk/{Path(argv[0]).name}.cfg'
 
-def bytes_to_human_readable(bytes: int) -> str:
-    """
-    Convert bytes to a human-readable string format.
 
-    :param bytes: Number of bytes.
-    :return: Human-readable string representation of the bytes.
+class Namespace:
     """
-    # just in case
-    bytes = int(bytes)
-    if bytes < 1024:
-        return f'{bytes} B'
-    elif bytes < 1024 ** 2:
-        return f'{bytes / 1024:.2f} KB'
-    elif bytes < 1024 ** 3:
-        return f'{bytes / 1024 ** 2:.2f} MB'
-    elif bytes < 1024 ** 4:
-        return f'{bytes / 1024 ** 3:.2f} GB'
+    Collect all namespace related information
+    """
+    name = ''
+    pods = dict()
+    persistent_volumes = dict()
+    deployments = dict()
+    daemonsets = dict()
+    replicasets = dict()
+    cronjobs = dict()
+
+    def __init__(self, name):
+        """
+        Initialize Namespace with a name
+        :param name: Name of the namespace
+        """
+        self.name = name
+
+    def as_dict(self):
+        """
+        Convert Namespace object to dictionary for final output
+        :return: Dictionary
+        """
+        return {
+            'name': self.name,
+            'pods': self.pods,
+            'persistent_volumes': self.persistent_volumes,
+            'deployments': self.deployments,
+            'daemonsets': self.daemonsets,
+            'replicasets': self.replicasets,
+            'cronjobs': self.cronjobs
+        }
+
+
+def configure_plugin():
+    """
+    Configure the plugin by reading environment variables from a configuration file.
+
+    This function reads the configuration file specified by CONFIG_FILE. Each line in the file
+    should be in the format 'KEY=VALUE'. The function sets these key-value pairs as environment
+    variables.
+    """
+    # Check if the configuration file exists and is a file
+    if Path(CONFIG_FILE).exists() and Path(CONFIG_FILE).is_file():
+        # Read the configuration file line by line
+        for line in Path(CONFIG_FILE).read_text().splitlines():
+            # Split each line into key and value
+            split_line = line.split('=')
+            if len(split_line) == 2:
+                key, value = split_line
+                # Set the environment variable
+                environ[key] = value
+
+
+def get_kubectl_binary() -> str:
+    """
+    Get the path to the kubectl binary
+    :return: Path to kubectl binary
+    """
+    for path in ['/usr/local/bin/kubectl',
+                 '/usr/bin/kubectl',
+                 '/bin/kubectl',
+                 '/snap/bin/kubectl']:
+        # when the path is a file and executable the path is returned
+        if Path(path).is_file() and \
+                access(path, X_OK):
+            return path
+    return None
+
+
+def kubectl(command: str,
+            namespace: str = '',
+            execute: str = '',
+            output_json: bool = True) -> dict:
+    """
+    Run kubectl command and return the output as a dictionary
+    :param command: kubectl command to run
+    :param namespace: Kubernetes namespace
+    :param execute: Additional command to execute
+    :param output_json: Whether to output in JSON format
+    :return: Command output as dictionary
+    """
+
+    # Construct the base kubectl command
+    # Fun fact: variabe KUBECTL is known here because it is defined in the same scope
+    #           as this function is called in the main block
+    command_line = f'{KUBECTL} {command}'
+
+    # Append the output format to JSON if specified
+    if output_json:
+        command_line += ' --output json'
+
+    # Append the namespace if specified
+    if namespace:
+        command_line += f' --namespace {namespace}'
+
+    # Append any additional command to execute if specified
+    if execute:
+        command_line += f' -- {execute}'
+
+    # Execute the constructed command
+    result = run(command_line, shell=True, stdout=PIPE, stderr=PIPE, text=True)
+
+    # Process the command output
+    if result.stdout:
+        if output_json:
+            # Parse and return the JSON output
+            return loads(result.stdout)
+        else:
+            # Return the raw output
+            return result.stdout
     else:
-        return f'{bytes / 1024 ** 4:.2f} TB'
+        # Return an empty dictionary if there is no output
+        return dict()
 
 
-def parse_kubernetes_namespaces(string_table):
+def get_namespaces() -> list:
     """
-    Parse the Kubernetes namespaces from the given string table in agent output
-
-    :param string_table: List of Checkmk items
-    :return: List of parsed lines.
+    Get the list of namespaces
+    :return: List of namespaces
     """
-    parsed_lines = []
-    # string_table cames in raw text format, resembling Python dictionaries
-    for line in string_table:
-        if len(line) > 0:
-            try:
-                # eval() is used to convert the string to a real dictionary
-                parsed_lines.append(eval(line[0]))
-            except Exception as exception:
-                print(exception)
-    return parsed_lines
+    # Get the list of namespaces using kubectl
+    namespaces = kubectl('get namespace')
+
+    # Check if the namespaces dictionary is not empty and contains 'items'
+    if namespaces and namespaces.get('items'):
+        # Extract and return the list of namespace names
+        return [x['metadata']['name'] for x in namespaces['items']]
+    else:
+        # Return an empty dictionary if no namespaces are found
+        return {}
 
 
-def discover_kubernetes_namespaces(section):
+def get_namespace_resources(namespace: str) -> dict:
     """
-    Discover Kubernetes namespaces from the given section.
-
-    :param section: Section containing namespace information.
-    :yield: Service objects for each discovered namespace.
+    Get all resources in a namespace
+    :param namespace: Namespace to get resources from
+    :return: Dictionary of namespace resources
     """
-    # Iterate over each group in the section
-    for group in section:
-        # Ensure the group is not 'check_mk' and is a dictionary with a 'name' key
-        if group != 'check_mk' and \
-                isinstance(group, dict) and \
-                group.get('name'):
-            # Iterate over each Kubernetes object in the group
-            for kubernetes_object_name, kubernetes_object in group.items():
-                if kubernetes_object_name != 'name':
-                    # If the Kubernetes object is not in the simplified list, iterate over its details
-                    if not kubernetes_object_name in SIMPLE_KUBERNETES_OBJECTS:
-                        for kubernetes_object_detail_name, kubernetes_object_detail in kubernetes_object.items():
-                            # Yield a Service object for each detailed Kubernetes object
-                            yield Service(item=SEPARATOR.join(
-                                [group['name'], kubernetes_object_name, kubernetes_object_detail_name]))
-                    else:
-                        # Yield a Service object for simplified Kubernetes objects
-                        if kubernetes_object:
-                            yield Service(item=SEPARATOR.join([group['name'], kubernetes_object_name]))
+    # Get all resources in the specified namespace using kubectl
+    namespace_resources = kubectl('get all', namespace)
+
+    # Return the dictionary of namespace resources
+    return namespace_resources
 
 
-def check_kubernetes_namespaces(item, params, section):
+def get_persistent_volumes(namespace_resources: dict) -> dict:
     """
-    Check the status of Kubernetes namespaces.
-
-    :param item: Item to check.
-    :param params: Parameters for the check.
-    :param section: Section containing namespace information.
-    :yield: Result and Metric objects for the check.
+    Get persistent volumes in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of persistent volumes
     """
-    # Extract namespace and resource names from the item, separated by SEPARATOR
-    # e.g. from 'kube-system / deployments / local-path-provisioner'
-    namespace_name = item.split(SEPARATOR)[0]
-    resource_name = item.split(SEPARATOR)[-1]
-
-    # Get warning and critical thresholds for persistent volumes and cronjob age
-    percentage_persistent_volumes_warning, percentage_persistent_volumes_critical = params.get(
-        'percentage_persistent_volumes')
-    threshold_cronjob_count_warning, threshold_cronjob_count_critical = params.get(
-        'threshold_cronjob_count')
-
-    # Filter the section to find the namespace
-    namespace_list = [x for x in section if x.get('name') == namespace_name]
-
-    if namespace_list:
-        namespace = namespace_list[0]
-        # Iterate over each Kubernetes object in the namespace
-        for kubernetes_object_name, kubernetes_object in namespace.items():
-            if kubernetes_object_name != 'name':
-                # Determine the Kubernetes object from the item...
-                # ...if it should get less details like pods, which are summed up like
-                # 'cert-manager / pods'
-                if kubernetes_object_name in SIMPLE_KUBERNETES_OBJECTS:
-                    kubernetes_object_from_item = item.split(SEPARATOR)[-1]
-                # ...or if it should get more details like deployments, which look like
-                # 'cert-manager / deployments / cert-manager'
-                else:
-                    kubernetes_object_from_item = item.split(SEPARATOR)[-2]
-                # If the Kubernetes object matches the one from the item we go further
-                if kubernetes_object_name == kubernetes_object_from_item:
-                    if not namespace.get(kubernetes_object_name):
-                        continue
-                    # Default settings for summary and state
-                    # These values will be changed by the following actions and are used for the final result
-                    summary = f'{kubernetes_object}'
-                    state = State.OK
-
-                    # Single name of the Kubernetes object like name of a CronJob
-                    kubernetes_object_single_name = item.split(SEPARATOR)[-1]
-
-                    # Check the status of pods
-                    if kubernetes_object_name == 'pods':
-                        crashing = 0
-                        running = 0
-                        terminated = 0
-                        waiting = 0
-                        for pod in kubernetes_object.values():
-                            containers = pod.get('containers')
-                            if containers:
-                                # variuos pod states are summed up for a final summary
-                                crashing += len(containers.get('crashing', []))
-                                running += len(containers.get('running', []))
-                                terminated += len(containers.get('terminated', []))
-                                waiting += len(containers.get('waiting', []))
-                        summary = f'running: {running}, waiting: {waiting}, terminated: {terminated}, crashing: {crashing}'
-                        # crashing pods are critical
-                        if crashing > 0:
-                            state = State.CRIT
-
-                        # Metrics are yielded for the graphs
-                        yield Metric('pods_running', running)
-                        yield Metric('pods_waiting', waiting)
-                        yield Metric('pods_crashing', crashing)
-                        yield Metric('pods_terminated', terminated)
-
-                    # Check the status of deployments
-                    if kubernetes_object_name == 'deployments':
-                        replicas = 0
-                        ready_replicas = 0
-                        unavailable_replicas = 0
-                        for deployment in kubernetes_object.values():
-                            replicas += deployment.get('replicas', 0)
-                            ready_replicas += deployment.get('ready_replicas', 0)
-                            unavailable_replicas += deployment.get('unavailable_replicas', 0)
-                        summary = f'replicas: {replicas}, ready: {ready_replicas}, unavailable: {unavailable_replicas}'
-                        # if not all replicas are ready, it is a critical state
-                        if replicas != ready_replicas:
-                            state = State.CRIT
-
-                        # Metrics are yielded for the graphs
-                        yield Metric('deployments_replicas', replicas)
-                        yield Metric('deployments_ready_replicas', ready_replicas)
-                        yield Metric('deployments_unavailable_replicas', unavailable_replicas)
-
-                    # Check the status of daemonsets
-                    if kubernetes_object_name == 'daemonsets':
-                        current_number_scheduled = 0
-                        desired_number_scheduled = 0
-                        number_ready = 0
-                        number_unavailable = 0
-                        for daemonset in kubernetes_object.values():
-                            current_number_scheduled += daemonset.get('current_number_scheduled', 0)
-                            desired_number_scheduled += daemonset.get('desired_number_scheduled', 0)
-                            number_ready += daemonset.get('number_ready', 0)
-                            number_unavailable += daemonset.get('number_unavailable', 0)
-                        summary = f'current: {current_number_scheduled}, desired: {desired_number_scheduled}, ready: {number_ready}, unavailable: {number_unavailable}'
-
-                        # DaemonSets are critical if not all are ready
-                        if number_unavailable > 0:
-                            state = State.CRIT
-
-                        # Metrics are yielded for the graphs
-                        yield Metric('daemonsets_current_number_scheduled', current_number_scheduled)
-                        yield Metric('daemonsets_desired_number_scheduled', desired_number_scheduled)
-                        yield Metric('daemonsets_number_ready', number_ready)
-                        yield Metric('daemonsets_number_unavailable', number_unavailable)
-
-                    # Check the status of replicasets
-                    if kubernetes_object_name == 'replicasets':
-                        replicas = 0
-                        ready_replicas = 0
-                        unavailable_replicas = 0
-                        for replicaset in kubernetes_object.values():
-                            replicas += replicaset.get('replicas', 0)
-                            ready_replicas += replicaset.get('ready_replicas', 0)
-                            unavailable_replicas += replicaset.get('unavailable_replicas', 0)
-                        summary = f'replicas: {replicas}, ready: {ready_replicas}, unavailable: {unavailable_replicas}'
-
-                        # If not all replicas are ready, it is a critical state
-                        if replicas != ready_replicas:
-                            state = State.CRIT
-
-                        # Metrics are yielded for the graphs
-                        yield Metric('replicasets_replicas', replicas)
-                        yield Metric('replicasets_ready_replicas', ready_replicas)
-                        yield Metric('replicasets_unavailable_replicas', unavailable_replicas)
-
-                    # Check the status of cronjobs
-                    if kubernetes_object_name == 'cronjobs':
-                        cronjob = kubernetes_object.get(kubernetes_object_single_name, {})
-                        active = cronjob.get('active', 0)
-                        # When too many CronJobs are active something is wrong
-                        if active >= threshold_cronjob_count_warning:
-                            state = State.WARN
-                        if active >= threshold_cronjob_count_critical:
-                            state = State.CRIT
-
-                        summary = f'active: {active}'
-
-                        # Metrics are yielded for the graphs
-                        yield Metric('cronjobs_active', active)
-
-                    # Check the status of persistent volumes
-                    if kubernetes_object_name == 'persistent_volumes':
-                        if kubernetes_object.get(resource_name):
-                            persistent_volume = kubernetes_object.get(resource_name)
-                            capacity = persistent_volume.get('capacity', 0)
-                            used = persistent_volume.get('used', 0)
-                            percentage = persistent_volume.get('percentage', 0)
-                            summary = f'used: {bytes_to_human_readable(used)} capacity: {bytes_to_human_readable(capacity)} percentage: {percentage} %'
-
-                            # If the percentage of the persistent volume is higher than the thresholds,
-                            # it is a warning or critical state
-                            if percentage > percentage_persistent_volumes_warning:
-                                state = State.WARN
-                            if percentage > percentage_persistent_volumes_critical:
-                                state = State.CRIT
-
-                            # Metrics are yielded for the graphs
-                            yield Metric(name='persistent_volume_used',
-                                         value=used,
-                                         boundaries=(0.0, capacity))
-                            yield Metric(name='persistent_volume_capacity',
-                                         value=capacity,
-                                         boundaries=(0.0, capacity))
-                            yield Metric(name='persistent_volume_percentage',
-                                         value=percentage,
-                                         levels=(
-                                             percentage_persistent_volumes_warning,
-                                             percentage_persistent_volumes_critical),
-                                         boundaries=(0.0, 100.0))
-
-                    # Yield the result for the current Kubernetes object
-                    yield Result(state=state, summary=summary)
+    # Filter running pods from the namespace resources
+    pods = [x for x in namespace_resources['items'] if x.get('kind') == 'Pod'
+            and x.get('status', {}).get('phase') == 'Running']
+    persistent_volumes = dict()
+    # To avoid scanning the same mounted volume multiple times, store its name in this list
+    mounts_scanned = list()
+    # We run through all pods...
+    for pod in pods:
+        # ...and check if the pod has volumes to scan...
+        if 'volumes' in pod['spec']:
+            # ...for every volume in the pod...
+            for volume in pod['spec']['volumes']:
+                # ...every container has to be inspected...
+                for container in pod['spec']['containers']:
+                    # ...if persistent volume is used...
+                    if 'persistentVolumeClaim' in volume:
+                        # ...and the volume is mounted in the container...
+                        for mount in container['volumeMounts']:
+                            # ...and the mount is not already scanned...
+                            if mount['name'] == volume['name'] and \
+                                    mount['name'] not in mounts_scanned:
+                                # ...execute 'df' command inside the pod to get volume usage
+                                df = kubectl(command=f"exec {pod['metadata']['name']}",
+                                             namespace=pod['metadata']['namespace'],
+                                             execute=f"df {mount['mountPath']}",
+                                             output_json=False)
+                                # When there is any result form `df` command...
+                                if df:
+                                    df_lines = df.splitlines()
+                                    # ...we run through all lines...
+                                    for df_line in df_lines:
+                                        df_line_split = df_line.split()
+                                        # ...and check if the line contains the necessary information
+                                        if 6 >= len(df_line_split) > 1:
+                                            # Extract capacity, used, available, and percentage from the 'df' output
+                                            capacity, used, available, used_percent, mountpoint = df_line.split()[-5:]
+                                            if capacity.isdigit() and used.isdigit() and available.isdigit():
+                                                capacity = int(capacity) * 1024
+                                                used = int(used) * 1024
+                                                available = int(available) * 1024
+                                                percentage = int((used / capacity) * 100)
+                                                # Store the persistent volume information in the dictionary
+                                                persistent_volumes[volume['persistentVolumeClaim']['claimName']] = {
+                                                    'namespace': namespace,
+                                                    'pvc': volume['persistentVolumeClaim']['claimName'],
+                                                    'percentage': percentage,
+                                                    'capacity': capacity,
+                                                    'used': used,
+                                                    'available': available}
+                                # Add to already scanned mounts so not to scan them again
+                                mounts_scanned.append(mount['name'])
+    return persistent_volumes
 
 
-register.agent_section(
-    name='kubernetes_namespaces',
-    parse_function=parse_kubernetes_namespaces,
-)
+def get_deployments(namespace_resources: dict) -> dict:
+    """
+    Get deployments in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of deployments
+    """
+    deployments = dict()
+    # Filter deployment resources from the namespace resources
+    deployments_resources = [x for x in namespace_resources['items'] if x['kind'] == 'Deployment']
+    for deployment in deployments_resources:
+        # Check if the deployment has necessary metadata and status information
+        if deployment.get('metadata') and \
+                deployment['metadata'].get('name') and \
+                deployment.get('status') and \
+                deployment['status'].get('replicas') and \
+                (deployment['status'].get('readyReplicas') or
+                 deployment['status'].get('unavailableReplicas')):
+            # Store the deployment information in the dictionary
+            deployments[deployment['metadata']['name']] = {
+                'replicas': deployment['status']['replicas'],
+                'ready_replicas': deployment['status'].get('readyReplicas', 0),
+                'unavailable_replicas': deployment['status'].get('unavailableReplicas', 0)
+            }
+    return deployments
 
-register.check_plugin(
-    name='kubernetes_namespaces',
-    sections=['kubernetes_namespaces'],
-    service_name='K8s %s',
-    discovery_function=discover_kubernetes_namespaces,
-    check_function=check_kubernetes_namespaces,
-    check_default_parameters={'percentage_persistent_volumes': (80.0, 90.0),
-                              'threshold_cronjob_count': (2, 3)},
-    check_ruleset_name='kubernetes_namespaces'
-)
+
+def get_daemonsets(namespace_resources: dict) -> dict:
+    """
+    Get daemonsets in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of daemonsets
+    """
+    daemonsets = dict()
+    # Filter daemonset resources from the namespace resources
+    daemonsets_resources = [x for x in namespace_resources['items'] if x['kind'] == 'DaemonSet']
+    for daemonset in daemonsets_resources:
+        # Check if the daemonset has necessary metadata and status information
+        if daemonset.get('metadata') and \
+                daemonset['metadata'].get('name') and \
+                daemonset.get('status') and \
+                daemonset['status'].get('currentNumberScheduled') and \
+                (daemonset['status'].get('numberReady') or
+                 daemonset['status'].get('numberUnavailable')):
+            # Store the daemonset information in the dictionary
+            daemonsets[daemonset['metadata']['name']] = {
+                'current_number_scheduled': daemonset['status']['currentNumberScheduled'],
+                'number_ready': daemonset['status'].get('numberReady', 0),
+                'number_unavailable': daemonset['status'].get('numberUnavailable', 0),
+                'desired_number_scheduled': daemonset['status'].get('desiredNumberScheduled', 0)
+            }
+    return daemonsets
+
+
+def get_replicasets(namespace_resources: dict) -> dict:
+    """
+    Get replicasets in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of replicasets
+    """
+    replicasets = dict()
+    # Filter replicaset resources from the namespace resources
+    replicasets_resources = [x for x in namespace_resources['items'] if x['kind'] == 'ReplicaSet']
+    for replicaset in replicasets_resources:
+        # Check if replicaset is part of a deployment
+        if replicaset.get('metadata') and \
+                not replicaset['metadata'].get('ownerReferences') or \
+                replicaset['metadata']['ownerReferences'][0].get('kind') != 'Deployment':
+            # Check if replicaset has necessary metadata and status information
+            if replicaset['metadata'].get('name') and \
+                    replicaset.get('status') and \
+                    replicaset['status'].get('replicas') and \
+                    (replicaset['status'].get('readyReplicas') or
+                     replicaset['status'].get('availableReplicas')):
+                # Store the replicaset information in the dictionary
+                replicasets[replicaset['metadata']['name']] = {
+                    'replicas': replicaset['status']['replicas'],
+                    'ready_replicas': replicaset['status'].get('readyReplicas', 0),
+                    'available_replicas': replicaset['status'].get('availableReplicas', 0)
+                }
+    return replicasets
+
+
+def get_cronjobs(namespace_resources: dict) -> dict:
+    """
+    Get cronjobs in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of cronjobs
+    """
+    cronjobs = dict()
+    start_times = list()
+    # Filter cronjob resources from the namespace resources
+    cronjobs_resources = [x for x in namespace_resources['items'] if x['kind'] == 'CronJob']
+    for cronjob in cronjobs_resources:
+        # Check if the cronjob has necessary metadata and status information
+        if cronjob.get('metadata') and \
+                cronjob['metadata'].get('name') and \
+                cronjob.get('status'):
+
+            # Store the cronjob information in the dictionary
+            cronjobs[cronjob['metadata']['name']] = {
+                'active': len(cronjob['status'].get('active', []))
+            }
+    return cronjobs
+
+
+def get_pods(namespace_resources: dict) -> dict:
+    """
+    Get pods in a namespace
+    :param namespace_resources: Resources in the namespace
+    :return: Dictionary of pods
+    """
+    pods = dict()
+    # Filter pod resources from the namespace resources
+    pods_resources = [x for x in namespace_resources['items'] if x['kind'] == 'Pod']
+    for pod in pods_resources:
+        # Check if the pod has necessary metadata information
+        if pod.get('metadata') and \
+                pod['metadata'].get('name'):
+            # Initialize the pod's container states
+            pods[pod['metadata']['name']] = {'containers': {'crashing': list(),
+                                                            'running': list(),
+                                                            'waiting': list(),
+                                                            'terminated': list()}}
+
+        # Check if the pod has status information and container statuses
+        if pod.get('status') and \
+                pod['status'].get('containerStatuses'):
+            for container_status in pod['status']['containerStatuses']:
+                if container_status.get('state'):
+                    # Check if the container is in a waiting state
+                    if container_status['state'].get('waiting'):
+                        pods[pod['metadata']['name']]['containers']['waiting'].append(container_status.get('name'))
+                        # Check if the container is crashing
+                        if container_status['state']['waiting'].get('reason') == 'CrashLoopBackOff':
+                            pods[pod['metadata']['name']]['containers']['crashing'].append(container_status.get('name'))
+                    # Check if the container is in a running state
+                    if container_status['state'].get('running'):
+                        pods[pod['metadata']['name']]['containers']['running'].append(container_status.get('name'))
+                    # Check if the container is in a terminated state
+                    if container_status['state'].get('terminated'):
+                        pods[pod['metadata']['name']]['containers']['terminated'].append(container_status.get('name'))
+    return pods
+
+
+if __name__ == '__main__':
+
+    configure_plugin()
+
+    # Get the kubectl binary path
+    KUBECTL = get_kubectl_binary()
+
+    # Initialize namespaces
+    namespaces = {x: Namespace(x) for x in get_namespaces()}
+
+    # Collect resources for each namespace
+    for namespace in get_namespaces():
+        namespace_resources = get_namespace_resources(namespace)
+        namespaces[namespace].pods = get_pods(namespace_resources)
+        namespaces[namespace].persistent_volumes = get_persistent_volumes(namespace_resources)
+        namespaces[namespace].deployments = get_deployments(namespace_resources)
+        namespaces[namespace].daemonsets = get_daemonsets(namespace_resources)
+        namespaces[namespace].replicasets = get_replicasets(namespace_resources)
+        namespaces[namespace].cronjobs = get_cronjobs(namespace_resources)
+
+    # Print the collected namespace information
+    print('<<<kubernetes_namespaces:sep(59)>>>')
+    for namespace in namespaces:
+        print(namespaces[namespace].as_dict())
