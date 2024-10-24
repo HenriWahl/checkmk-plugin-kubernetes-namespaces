@@ -4,15 +4,19 @@
 # ©2024 henri.wahl@ukdd.de
 
 from json import loads
-from os import access, X_OK
+from os import access, X_OK, environ
 from pathlib import Path
 from subprocess import run, PIPE
+from sys import argv
 
 # Dictionary to store namespaces
 namespaces = dict()
 
 # Constant for beginning of time if there is no value for lastScheduleTime or lastSuccessfulTime
 TIME_ZERO = '1970-01-01T00:00:00Z'
+
+# Configuration file for the plugin
+CONFIG_FILE=f'/etc/check_mk/{Path(argv[0]).name}.cfg'
 
 
 class Namespace:
@@ -50,6 +54,26 @@ class Namespace:
         }
 
 
+def configure_plugin():
+    """
+    Configure the plugin by reading environment variables from a configuration file.
+
+    This function reads the configuration file specified by CONFIG_FILE. Each line in the file
+    should be in the format 'KEY=VALUE'. The function sets these key-value pairs as environment
+    variables.
+    """
+    # Check if the configuration file exists and is a file
+    if Path(CONFIG_FILE).exists() and Path(CONFIG_FILE).is_file():
+        # Read the configuration file line by line
+        for line in Path(CONFIG_FILE).read_text().splitlines():
+            # Split each line into key and value
+            split_line = line.split('=')
+            if len(split_line) == 2:
+                key, value = split_line
+                # Set the environment variable
+                environ[key] = value
+
+
 def get_kubectl_binary() -> str:
     """
     Get the path to the kubectl binary
@@ -78,6 +102,7 @@ def kubectl(command: str,
     :param output_json: Whether to output in JSON format
     :return: Command output as dictionary
     """
+
     # Construct the base kubectl command
     # Fun fact: variabe KUBECTL is known here because it is defined in the same scope
     #           as this function is called in the main block
@@ -346,6 +371,9 @@ def get_pods(namespace_resources: dict) -> dict:
 
 
 if __name__ == '__main__':
+
+    configure_plugin()
+
     # Get the kubectl binary path
     KUBECTL = get_kubectl_binary()
 
