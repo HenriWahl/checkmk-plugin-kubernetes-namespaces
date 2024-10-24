@@ -16,7 +16,10 @@ namespaces = dict()
 TIME_ZERO = '1970-01-01T00:00:00Z'
 
 # Configuration file for the plugin
-CONFIG_FILE=f'/etc/check_mk/{Path(argv[0]).name}.cfg'
+if environ.get('MK_CONFDIR'):
+    CONFIG_FILE=f"{environ.get('MK_CONFDIR')}/check_mk/{Path(argv[0]).name}.cfg"
+else:
+    CONFIG_FILE=f'/etc/check_mk/{Path(argv[0]).name}.cfg'
 
 
 class Namespace:
