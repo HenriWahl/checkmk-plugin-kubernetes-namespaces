@@ -95,7 +95,7 @@ def _valuespec_kubernetes_namespaces() -> Dictionary:
                                    FixedValue(
                                        title=_('PersistentVolumes'),
                                        value=True,
-                                       totext='Discover Deployments',
+                                       totext='Discover PersistentVolumes',
                                        help=_('When enabled, discover PersistentVolumes'),
                                    ),
                                ),

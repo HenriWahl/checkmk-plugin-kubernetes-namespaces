@@ -33,7 +33,11 @@ The plugin will be available in the agent bakery.
 
 The resulting services in Checkmk will look like this:
 
-![Checkmk Kubernetes Namespaces Plugin](docs/checkmk-k8s.png)
+![Checkmk Kubernetes Namespaces Plugin](docs/checkmk-k8s-status.png)
+
+If just some cluster resources should be monitored, the WATO rule can be used to customize some namespaces:
+
+![Checkmk Kubernetes Namespaces Plugin](docs/checkmk-k8s-wato.png)
 
 ## License
 
