@@ -3,7 +3,8 @@ volumes:
 
 services:
   checkmk:
-    image: checkmk/check-mk-raw:2.3.0p17
+    #image: checkmk/check-mk-raw:2.3.0p19
+    image: checkmk/check-mk-cloud:2.3.0p19
     restart: no
     ports:
       - 5000:5000
@@ -17,5 +18,5 @@ services:
       - ${PWD}/mkp/agents/plugins/kubernetes_namespaces.py:/omd/versions/default/share/agents/plugins/kubernetes_namespaces.py
       - ${PWD}/mkp/web/plugins/metrics/kubernetes_namespaces.py:/omd/versions/default/share/web/plugins/metrics/kubernetes_namespaces.py
       - ${PWD}/mkp/web/plugins/wato/kubernetes_namespaces.py:/omd/versions/default/share/check_mk/web/plugins/wato/kubernetes_namespaces.py
-      - ${PWD}/mkp/web/plugins/wato/kubernetes_namespaces_bakery.py:/omd/versions/default/share/check_mk/web/plugins/wato/kubernetes_namespaces_bakery.py
+      - ${PWD}/mkp/web/plugins/wato/kubernetes_namespaces_cee.py:/omd/versions/default/share/check_mk/web/plugins/wato/kubernetes_namespaces_cee.py
 

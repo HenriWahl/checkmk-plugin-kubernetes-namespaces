@@ -17,7 +17,7 @@ TIME_ZERO = '1970-01-01T00:00:00Z'
 
 # Configuration file for the plugin
 if environ.get('MK_CONFDIR'):
-    CONFIG_FILE=f"{environ.get('MK_CONFDIR')}/check_mk/{Path(argv[0]).name}.cfg"
+    CONFIG_FILE=f"{environ.get('MK_CONFDIR')}/{Path(argv[0]).name}.cfg"
 else:
     CONFIG_FILE=f'/etc/check_mk/{Path(argv[0]).name}.cfg'
 
@@ -66,15 +66,19 @@ def configure_plugin():
     variables.
     """
     # Check if the configuration file exists and is a file
-    if Path(CONFIG_FILE).exists() and Path(CONFIG_FILE).is_file():
-        # Read the configuration file line by line
-        for line in Path(CONFIG_FILE).read_text().splitlines():
-            # Split each line into key and value
-            split_line = line.split('=')
-            if len(split_line) == 2:
-                key, value = split_line
-                # Set the environment variable
-                environ[key] = value
+    try:
+        if Path(CONFIG_FILE).exists() and Path(CONFIG_FILE).is_file():
+            # Read the configuration file line by line
+            for line in Path(CONFIG_FILE).read_text().splitlines():
+                # Split each line into key and value
+                split_line = line.split('=')
+                if len(split_line) == 2:
+                    key, value = split_line
+                    # Set the environment variable
+                    environ[key] = value
+    except PermissionError:
+        # file does not exist or is not readable
+        pass
 
 
 def get_kubectl_binary() -> str:

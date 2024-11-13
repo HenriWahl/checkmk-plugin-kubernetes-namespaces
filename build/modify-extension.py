@@ -18,10 +18,6 @@ if len(argv) > 2:
     if Path(package_file_path).exists() and Path(package_file_path).is_file():
         # get version information from git repo
         repo = Repo(path=git_repo_path, search_parent_directories=True)
-
-        print(repo)
-        print(repo.head.commit)
-
         # if no tag is latest take repo head
         version_repo = next((tag for tag in repo.tags if tag.commit == repo.head.commit), repo.head.commit)
         if type(version_repo) == Commit:
@@ -41,7 +37,7 @@ if len(argv) > 2:
         package_config['author'] = 'Henri Wahl'
         package_config['description'] = 'Checks status of Kubernetes namespaces'
         package_config['download_url'] = 'https://github.com/HenriWahl/checkmk-agent-plugin-kubernetes-namespaces/releases'
-        package_config['title'] = 'Kubernetes Namespaces'
+        package_config['title'] = 'Kubernetes namespaces'
         package_config['version'] = version
         package_config['version.min_required'] = '2.2.0p1'
 

@@ -11,6 +11,7 @@ from typing import TypedDict, List
 from .bakery_api.v1 import (FileGenerator,
                             OS,
                             Plugin,
+                            PluginConfig,
                             register)
 
 
@@ -35,8 +36,12 @@ def get_kubernetes_namespaces_plugin_files(conf: KubernetesNamespacesConfig) -> 
     yield Plugin(
         base_os=OS.LINUX,
         source=Path('kubernetes_namespaces.py'),
-        interval=interval
-    )
+        interval=interval)
+    if 'kubeconfig_path' in conf:
+        yield PluginConfig(base_os=OS.LINUX,
+                           lines=[f"KUBECONFIG={conf['kubeconfig_path']}"],
+                           target=Path("kubernetes_namespaces.cfg"),
+                           include_header=True)
 
 
 register.bakery_plugin(
